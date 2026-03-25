@@ -1,4 +1,3 @@
-# app/api/admin.py
 """
 RAG Policy Store admin endpoint.
 Single endpoint: upload a PDF (or .txt/.md) to inject into the policy store.
