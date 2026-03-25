@@ -1,0 +1,74 @@
+{
+  "sample_outputs": [
+    {
+      "url": "https://www.amazon.com",
+      "is_cashback_site": false,
+      "is_adult_content": false,
+      "is_gambling": false,
+      "is_agency_or_introductory": false,
+      "is_scam_or_low_quality": false,
+      "overall_score": 95,
+      "summary": "Legitimate e-commerce platform with extensive original content, clear business model, and strong trust signals.",
+      "confidence": "high",
+      "scraped_content_length": 4892,
+      "classification_time_ms": 2340,
+      "rag_chunks_used": 3
+    },
+    {
+      "url": "https://www.rakuten.com",
+      "is_cashback_site": true,
+      "is_adult_content": false,
+      "is_gambling": false,
+      "is_agency_or_introductory": false,
+      "is_scam_or_low_quality": false,
+      "overall_score": 82,
+      "summary": "Legitimate cashback site with clear rewards program and established business model.",
+      "confidence": "high",
+      "scraped_content_length": 3241,
+      "classification_time_ms": 2190,
+      "rag_chunks_used": 2
+    },
+    {
+      "url": "https://www.fanduel.com",
+      "is_cashback_site": false,
+      "is_adult_content": false,
+      "is_gambling": true,
+      "is_agency_or_introductory": false,
+      "is_scam_or_low_quality": false,
+      "overall_score": 0,
+      "summary": "Sports betting platform offering real money gambling - rejected per policy.",
+      "confidence": "high",
+      "scraped_content_length": 2876,
+      "classification_time_ms": 1950,
+      "rag_chunks_used": 2
+    },
+    {
+      "url": "https://www.top10bestcasinos.com",
+      "is_cashback_site": false,
+      "is_adult_content": false,
+      "is_gambling": true,
+      "is_agency_or_introductory": true,
+      "is_scam_or_low_quality": false,
+      "overall_score": 15,
+      "summary": "Affiliate site promoting gambling services with thin content - flagged.",
+      "confidence": "high",
+      "scraped_content_length": 1234,
+      "classification_time_ms": 1870,
+      "rag_chunks_used": 3
+    },
+    {
+      "url": "https://www.suspicious-offers.com",
+      "is_cashback_site": false,
+      "is_adult_content": false,
+      "is_gambling": false,
+      "is_agency_or_introductory": true,
+      "is_scam_or_low_quality": true,
+      "overall_score": 10,
+      "summary": "Site exhibits multiple scam indicators: fake prize claims, excessive popups, no contact information.",
+      "confidence": "medium",
+      "scraped_content_length": 456,
+      "classification_time_ms": 1670,
+      "rag_chunks_used": 3
+    }
+  ]
+}
