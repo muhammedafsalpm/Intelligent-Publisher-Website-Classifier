@@ -9,6 +9,7 @@ from app.api import classify
 from app.models import HealthResponse
 from app.utils.cache import cache
 from app.services.rag import PolicyStore
+from app.services.llm.factory import llm_factory
 from app.config import settings
 from app.utils.logger import logger
 
@@ -39,25 +40,49 @@ app.include_router(classify.router, prefix="/api", tags=["classification"])
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
-    logger.info("Starting Publisher Classifier API...")
+    logger.info(f"Starting Publisher Classifier API with LLM provider: {settings.llm_provider}")
     await cache.connect()
-    logger.info("API ready")
+    
+    # Initialize LLM client
+    llm_factory.get_client()
+    
+    # Initialize policy store
+    policy_store = PolicyStore()
+    
+    logger.info(f"API ready - Provider: {settings.llm_provider}, Model: {settings.openai_model if settings.llm_provider == 'openai' else settings.ollama_model}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down...")
     await cache.close()
+    await llm_factory.close()
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
     policy_store = PolicyStore()
+    
+    # Check LLM provider health
+    llm_healthy = True
+    try:
+        client = llm_factory.get_client()
+        # Simple test
+        await client.chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            response_format="text"
+        )
+    except Exception as e:
+        llm_healthy = False
+        logger.error(f"LLM provider {settings.llm_provider} health check failed: {e}")
+    
     return HealthResponse(
-        status="healthy",
-        model=settings.llm_model,
+        status="healthy" if llm_healthy else "degraded",
+        model=settings.openai_model if settings.llm_provider == "openai" else settings.ollama_model,
         policies_loaded=policy_store.collection.count(),
-        redis_connected=cache._connected
+        redis_connected=cache._connected,
+        llm_provider=settings.llm_provider,
+        llm_healthy=llm_healthy
     )
 
 @app.get("/")
@@ -66,5 +91,7 @@ async def root():
     return {
         "service": "Publisher Website Classifier",
         "version": settings.api_version,
+        "llm_provider": settings.llm_provider,
+        "model": settings.openai_model if settings.llm_provider == "openai" else settings.ollama_model,
         "docs": "/docs" if settings.debug else "disabled in production"
     }

@@ -1,13 +1,13 @@
-# app/services/classifier.py
 import time
 from typing import Dict
 import asyncio
 from app.services.scraper import WebsiteScraper
 from app.services.rag import PolicyStore
-from app.services.llm import LLMClient
+from app.services.llm.client import LLMClient
 from app.services.signal_extractor import SignalExtractor
 from app.utils.cache import cache
 from app.utils.logger import logger
+from app.config import settings
 
 class WebsiteClassifier:
     def __init__(self):
@@ -15,10 +15,13 @@ class WebsiteClassifier:
         self.policy_store = PolicyStore()
         self.llm = LLMClient()
         self.signal_extractor = SignalExtractor()
+        self.provider = settings.llm_provider
     
     async def classify(self, url: str) -> Dict:
-        """Main classification pipeline - pure LLM, no hardcoded rules"""
+        """Main classification pipeline with provider support"""
         start_time = time.time()
+        
+        logger.info(f"Classification started for {url} using {self.provider}")
         
         # Check cache
         cached = await cache.get(url)
@@ -33,21 +36,21 @@ class WebsiteClassifier:
             if content.get('error'):
                 return self._get_error_response(url, content['error'])
             
-            # Step 2: Validate content exists
-            if len(content['main_text']) < 200:
+            # Step 2: Validate content
+            if len(content['main_text']) < settings.min_content_length:
                 return self._get_low_content_response(url)
             
-            # Step 3: Extract signals using LLM (no hardcoded keywords!)
+            # Step 3: Extract signals using LLM
             signals = await self.signal_extractor.extract_signals(
                 content['main_text'],
                 url
             )
             
-            # Step 4: Retrieve policies using signals (RAG)
+            # Step 4: Retrieve policies (RAG)
             query = self._build_rag_query(content, signals)
             policy_text, retrieved_policies = self.policy_store.retrieve_relevant_policies(query)
             
-            # Step 5: LLM classification (with no hardcoded rules)
+            # Step 5: LLM classification
             classification = await self.llm.classify_site(
                 content['main_text'],
                 policy_text,
@@ -61,6 +64,7 @@ class WebsiteClassifier:
                 'scraped_content_length': len(content['main_text']),
                 'classification_time_ms': int((time.time() - start_time) * 1000),
                 'rag_chunks_used': len(retrieved_policies),
+                'llm_provider': self.provider,
                 'cache_hit': False
             }
             
@@ -73,13 +77,13 @@ class WebsiteClassifier:
         except asyncio.TimeoutError:
             return self._get_timeout_response(url)
         except Exception as e:
-            logger.error(f"Classification failed for {url}: {e}")
+            logger.error(f"Classification failed for {url} with {self.provider}: {e}")
             return self._get_error_response(url, str(e))
     
     def _build_rag_query(self, content: Dict, signals: Dict) -> str:
-        """Build query for RAG retrieval using signals"""
+        """Build query for RAG retrieval"""
         return f"""
-        Website needs classification:
+        Website needs classification using {self.provider}:
         URL: {content.get('title', '')}
         Category: {signals.get('primary_category', 'unknown')}
         Keywords: {', '.join(signals.get('keywords', [])[:10])}
@@ -90,7 +94,7 @@ class WebsiteClassifier:
         """
     
     def _get_error_response(self, url: str, error: str) -> Dict:
-        """Return response for error cases - no hardcoded rules"""
+        """Return response for error cases"""
         return {
             'url': url,
             'is_cashback_site': False,
@@ -99,8 +103,9 @@ class WebsiteClassifier:
             'is_agency_or_introductory': True,
             'is_scam_or_low_quality': True,
             'overall_score': 0,
-            'summary': f"Technical error: Unable to classify site. {error[:100]}",
+            'summary': f"Technical error with {self.provider}: Unable to classify site. {error[:100]}",
             'confidence': 'low',
+            'llm_provider': self.provider,
             'cache_hit': False
         }
     
@@ -116,6 +121,7 @@ class WebsiteClassifier:
             'overall_score': 25,
             'summary': "Insufficient content extracted from site. Likely low-quality or misconfigured.",
             'confidence': 'low',
+            'llm_provider': self.provider,
             'cache_hit': False
         }
     
@@ -131,5 +137,6 @@ class WebsiteClassifier:
             'overall_score': 0,
             'summary': "Site response timeout. Flagged for manual review.",
             'confidence': 'low',
+            'llm_provider': self.provider,
             'cache_hit': False
         }

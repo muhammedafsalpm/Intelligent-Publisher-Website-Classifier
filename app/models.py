@@ -1,5 +1,5 @@
 from pydantic import BaseModel, HttpUrl, Field, validator
-from typing import Optional, Literal
+from typing import Optional, List
 from enum import Enum
 
 class ConfidenceLevel(str, Enum):
@@ -30,6 +30,7 @@ class ClassificationResponse(BaseModel):
     scraped_content_length: Optional[int] = None
     classification_time_ms: Optional[int] = None
     rag_chunks_used: Optional[int] = None
+    llm_provider: Optional[str] = None
     cache_hit: bool = False
 
 class HealthResponse(BaseModel):
@@ -37,3 +38,5 @@ class HealthResponse(BaseModel):
     model: str
     policies_loaded: int
     redis_connected: bool
+    llm_provider: str
+    llm_healthy: bool
