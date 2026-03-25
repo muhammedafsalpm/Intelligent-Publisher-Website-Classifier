@@ -15,16 +15,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rag-policy-store", tags=["rag-policy-store"])
 
-# --- Auth ---
-_api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
-def _require_admin(api_key: Optional[str] = Depends(_api_key_header)):
-    expected = os.getenv("ADMIN_API_KEY", "changeme")
-    if not api_key or api_key != expected:
-        raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Key header")
-
-
-@router.post("/upload", dependencies=[Depends(_require_admin)])
+@router.post("/upload")
 async def upload_policy(
     file: UploadFile = File(...),
     section_title: Optional[str] = None,
