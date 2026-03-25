@@ -1,9 +1,13 @@
+# app/services/llm/base_client.py
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 class BaseLLMClient(ABC):
-    """Abstract base class for all LLM providers"""
+    """Abstract base class for all LLM providers - ensures no circular imports"""
     
     def __init__(self, model: str, temperature: float, max_tokens: int):
         self.model = model
@@ -15,7 +19,7 @@ class BaseLLMClient(ABC):
         self,
         messages: List[Dict[str, str]],
         response_format: str = "json"
-    ) -> Dict[ Any, Any]:
+    ) -> Dict[str, Any]:
         """Send chat completion request to LLM"""
         pass
     

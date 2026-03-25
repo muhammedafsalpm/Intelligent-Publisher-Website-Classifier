@@ -1,3 +1,11 @@
+import asyncio
+import sys
+import platform
+
+# Fix for Playwright NotImplementedError on Windows
+if platform.system() == 'Windows':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

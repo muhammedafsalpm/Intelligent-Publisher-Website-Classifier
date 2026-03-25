@@ -3,13 +3,12 @@ from typing import Dict, List, Any
 import json
 import logging
 from app.services.llm.factory import llm_factory
-from app.services.signal_extractor import SignalExtractor
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    """Unified LLM client that works with any provider"""
+    """Unified LLM client with improved error management and fallback support"""
     
     def __init__(self):
         self.client = llm_factory.get_client()
@@ -20,7 +19,7 @@ class LLMClient:
         policies: str,
         signals: Dict
     ) -> Dict:
-        """Classify website using configured LLM provider"""
+        """Classify website using LLM with explicit error capture"""
         
         prompt = self._build_dynamic_prompt(text, policies, signals)
         
@@ -35,52 +34,27 @@ class LLMClient:
                 response_format="json"
             )
             
-            # Ensure required fields exist
+            # Check for structural errors from provider
+            if "error" in result:
+                error_msg = result['error']
+                logger.error(f"LLM provider error ({settings.llm_provider}): {error_msg}")
+                return self._get_fallback_classification(signals, error_msg)
+            
             result = self._ensure_required_fields(result)
-            
-            # Track usage (if available)
-            if 'usage' in result:
-                self._track_usage(result['usage'])
-            
             return result
             
         except Exception as e:
-            logger.error(f"LLM classification failed with {settings.llm_provider}: {e}")
-            return self._get_fallback_response(signals)
+            logger.error(f"Classification pipeline breakdown: {e}", exc_info=True)
+            return self._get_fallback_classification(signals, str(e))
     
     async def extract_signals(self, text: str, url: str) -> Dict:
-        """Extract signals using configured LLM provider"""
+        """Extract signals with robustness for short/empty content"""
         
-        prompt = f"""
-        Analyze this website content and extract structured signals.
+        if not text or len(text) < 100:
+            logger.warning(f"Incomplete content for extraction: {url}")
+            return self._get_fallback_signals()
         
-        WEBSITE URL: {url}
-        
-        CONTENT PREVIEW:
-        {text[:3000]}
-        
-        Extract the following signals:
-        1. Primary category (ecommerce, blog, news, gambling, adult, cashback, agency, etc.)
-        2. Top 10 keywords (meaningful, not stopwords)
-        3. Content quality indicators (original, spammy, thin, etc.)
-        4. Business model (affiliate, direct sales, lead gen, etc.)
-        5. Trust signals present (contact info, privacy policy, about page, etc.)
-        6. Risk indicators (scam patterns, aggressive CTAs, popups, etc.)
-        7. Language detected
-        8. Estimated content uniqueness (unique vs generic)
-        
-        Return ONLY valid JSON with this exact structure:
-        {{
-            "primary_category": "string",
-            "keywords": ["string"],
-            "content_quality": "string",
-            "business_model": "string",
-            "trust_signals": ["string"],
-            "risk_indicators": ["string"],
-            "language": "string",
-            "uniqueness_score": 0.0-1.0
-        }}
-        """
+        prompt = self._build_signals_prompt(text, url)
         
         try:
             messages = [
@@ -93,14 +67,18 @@ class LLMClient:
                 response_format="json"
             )
             
-            # Add derived scores
+            if "error" in signals:
+                logger.error(f"Signals extract failed ({settings.llm_provider}): {signals['error']}")
+                return self._get_fallback_signals()
+            
+            # Enrich signals
             signals['quality_score'] = self._calculate_quality_score(signals)
             signals['risk_score'] = self._calculate_risk_score(signals)
             
             return signals
             
         except Exception as e:
-            logger.error(f"Signal extraction failed with {settings.llm_provider}: {e}")
+            logger.error(f"Signal extraction failure: {e}")
             return self._get_fallback_signals()
     
     def _get_system_prompt(self) -> str:
@@ -110,47 +88,63 @@ class LLMClient:
 Your role is to evaluate publisher websites against dynamic policies retrieved from our knowledge base.
 
 CRITICAL PRINCIPLES:
-1. BASE DECISIONS ON RETRIEVED POLICIES: The policies provided are your only source of truth for classification rules
+1. BASE DECISIONS ON RETRIEVED POLICIES: The policies provided are your only source of truth
 2. CONSIDER ALL EVIDENCE: Use extracted signals and content together
 3. BE PRECISE: Provide clear reasoning in the summary
-4. CALIBRATE CONFIDENCE: High = clear evidence, Medium = mixed signals, Low = insufficient information
-
-You have no hardcoded rules. All classification criteria come from the policies section.
+4. CALIBRATE CONFIDENCE: High = clear evidence, Medium = mixed signals, Low = insufficient
 
 Provider: {settings.llm_provider}
 Model: {self.client.model}"""
-    
+
     def _build_dynamic_prompt(self, text: str, policies: str, signals: Dict) -> str:
-        """Build prompt with no hardcoded assumptions"""
-        
+        """Build classification prompt"""
+        import json
         return f"""
-## ACTIVE POLICIES (Your Only Source of Classification Rules)
-{policies}
+        ## ACTIVE POLICIES
+        {policies}
+        
+        ## EXTRACTED SIGNALS
+        {json.dumps(signals, indent=2)}
+        
+        ## WEBSITE CONTENT
+        {text[:3000]}
+        
+        ## YOUR TASK
+        Based SOLELY on the policies above, classify this website.
+        
+        Return JSON ONLY:
+        {{
+            "is_cashback_site": boolean,
+            "is_adult_content": boolean,
+            "is_gambling": boolean,
+            "is_agency_or_introductory": boolean,
+            "is_scam_or_low_quality": boolean,
+            "overall_score": 0-100,
+            "summary": "brief explanation",
+            "confidence": "high|medium|low"
+        }}"""
 
-## EXTRACTED SIGNALS
-{json.dumps(signals, indent=2)}
-
-## WEBSITE CONTENT
-{text[:3000]}
-
-## YOUR TASK
-Based SOLELY on the policies above and the evidence provided, classify this website.
-
-Return a JSON object with:
-- is_cashback_site: boolean (based on policy definition)
-- is_adult_content: boolean (based on policy definition)
-- is_gambling: boolean (based on policy definition)
-- is_agency_or_introductory: boolean (based on policy definition)
-- is_scam_or_low_quality: boolean (based on policy definition)
-- overall_score: 0-100 (higher = better quality for our campaigns)
-- summary: Brief explanation referencing specific policies and evidence
-- confidence: "high", "medium", or "low"
-
-IMPORTANT: Your classification must directly reference the policies provided. Do not invent your own rules.
-"""
+    def _build_signals_prompt(self, text: str, url: str) -> str:
+        """Build signals extraction prompt"""
+        return f"""
+        Analyze this website and provide 8 structured signals in JSON.
+        
+        URL: {url}
+        CONTENT: {text[:2500]}
+        
+        Required JSON Fields:
+        - primary_category (e.g. blog, news, gambling, adult, cashback, agency)
+        - keywords (top 10 keywords)
+        - content_quality (original, spammy, thin, mixed)
+        - business_model (affiliate, direct sales, etc.)
+        - trust_signals (list: contact info, privacy, about, etc.)
+        - risk_indicators (list: scam patterns, popups, aggressive CTAs, etc.)
+        - language (detected language)
+        - uniqueness_score (0.0-1.0)
+        """
     
     def _ensure_required_fields(self, result: Dict) -> Dict:
-        """Ensure all required fields exist with defaults"""
+        """Ensure all required fields exist"""
         required = [
             "is_cashback_site", "is_adult_content", "is_gambling",
             "is_agency_or_introductory", "is_scam_or_low_quality",
@@ -164,48 +158,17 @@ IMPORTANT: Your classification must directly reference the policies provided. Do
                 elif field == "overall_score":
                     result[field] = 50
                 elif field == "summary":
-                    result[field] = "Classification based on available evidence"
+                    result[field] = "Inferred classification"
                 elif field == "confidence":
                     result[field] = "medium"
         
+        result['overall_score'] = max(0, min(100, result['overall_score']))
         return result
     
-    def _calculate_quality_score(self, signals: Dict) -> int:
-        """Calculate quality score from signals"""
-        score = 100
-        
-        quality_map = {
-            "high quality original": 0,
-            "original": -10,
-            "mixed": -20,
-            "thin": -40,
-            "spammy": -60
-        }
-        score += quality_map.get(signals.get('content_quality', ''), -30)
-        
-        trust_count = len(signals.get('trust_signals', []))
-        score += trust_count * 5
-        
-        risk_count = len(signals.get('risk_indicators', []))
-        score -= risk_count * 15
-        
-        return max(0, min(100, score))
-    
-    def _calculate_risk_score(self, signals: Dict) -> int:
-        """Calculate risk score (higher = more risky)"""
-        risk_score = 0
-        
-        risky_categories = ['gambling', 'adult', 'scam', 'agency']
-        if signals.get('primary_category') in risky_categories:
-            risk_score += 50
-        
-        risk_score += len(signals.get('risk_indicators', [])) * 10
-        
-        return min(100, risk_score)
-    
-    def _get_fallback_response(self, signals: Dict) -> Dict:
-        """Return safe fallback when LLM fails"""
-        risk_score = signals.get('risk_score', 70)
+    def _get_fallback_classification(self, signals: Dict, error_msg: str = None) -> Dict:
+        """Return safe fallback classification"""
+        risk_score = signals.get('risk_score', 70) if signals else 70
+        reason = f"Classification fault: {error_msg if error_msg else 'No LLM signal'}"
         
         return {
             "is_cashback_site": False,
@@ -214,26 +177,38 @@ IMPORTANT: Your classification must directly reference the policies provided. Do
             "is_agency_or_introductory": risk_score > 50,
             "is_scam_or_low_quality": risk_score > 60,
             "overall_score": max(0, 100 - risk_score),
-            "summary": f"Classification system encountered an error with {settings.llm_provider}. Site flagged for manual review.",
+            "summary": f"{reason}. Flagged for manual audit.",
             "confidence": "low"
         }
     
     def _get_fallback_signals(self) -> Dict:
-        """Return safe fallback signals"""
+        """Standard fallback signals"""
         return {
             "primary_category": "unknown",
             "keywords": [],
             "content_quality": "unknown",
             "business_model": "unknown",
             "trust_signals": [],
-            "risk_indicators": ["signal_extraction_failed"],
+            "risk_indicators": ["extraction_fault"],
             "language": "unknown",
             "uniqueness_score": 0.5,
             "quality_score": 30,
             "risk_score": 70
         }
-    
-    def _track_usage(self, usage):
-        """Track token usage for cost monitoring"""
-        provider = settings.llm_provider
-        logger.info(f"LLM Usage ({provider}) - Input: {usage.get('prompt_tokens', usage.get('prompt_eval_count', 0))}, Output: {usage.get('completion_tokens', usage.get('eval_count', 0))}")
+
+    def _calculate_quality_score(self, signals: Dict) -> int:
+        """Calculates derived quality score"""
+        score = 100
+        quality_map = {"original": 0, "mixed": -20, "thin": -40, "spammy": -60}
+        score += quality_map.get(signals.get('content_quality', ''), -30)
+        score += len(signals.get('trust_signals', [])) * 5
+        score -= len(signals.get('risk_indicators', [])) * 15
+        return max(0, min(100, score))
+
+    def _calculate_risk_score(self, signals: Dict) -> int:
+        """Calculates derived risk score"""
+        score = 0
+        if signals.get('primary_category') in ['gambling', 'adult', 'scam', 'agency']:
+            score += 50
+        score += len(signals.get('risk_indicators', [])) * 10
+        return min(100, score)

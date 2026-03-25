@@ -1,3 +1,4 @@
+# app/services/signal_extractor.py
 from typing import Dict
 import logging
 from app.services.llm.client import LLMClient
@@ -5,7 +6,7 @@ from app.services.llm.client import LLMClient
 logger = logging.getLogger(__name__)
 
 class SignalExtractor:
-    """Extract signals using LLM - provider-agnostic"""
+    """Extract signals using LLM - Decoupled from core classification logic"""
     
     def __init__(self):
         self.llm_client = LLMClient()

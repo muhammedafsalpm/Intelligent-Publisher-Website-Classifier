@@ -1,10 +1,10 @@
+# requirements.txt - No Playwright
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 httpx==0.25.1
 beautifulsoup4==4.12.2
-playwright==1.40.0
 chromadb==0.4.22
 openai==1.6.1
 redis==5.0.1

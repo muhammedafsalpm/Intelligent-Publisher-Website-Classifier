@@ -3,13 +3,13 @@ import httpx
 from typing import Dict, List, Any
 import json
 import logging
-from app.services.llm.base import BaseLLMClient
+from app.services.llm.base_client import BaseLLMClient
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 class OllamaClient(BaseLLMClient):
-    """Ollama (local Llama) implementation of LLM client"""
+    """Ollama implementation with proper error handling and health checks"""
     
     def __init__(self):
         super().__init__(
@@ -18,16 +18,21 @@ class OllamaClient(BaseLLMClient):
             max_tokens=settings.ollama_max_tokens
         )
         self.base_url = settings.ollama_base_url
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.client = httpx.AsyncClient(timeout=60.0)  # Increased timeout for classification
     
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
         response_format: str = "json"
     ) -> Dict[str, Any]:
-        """Send chat completion to Ollama"""
+        """Send chat completion to Ollama with connection and response validation"""
         try:
-            # Convert messages to Ollama format
+            # Check if Ollama is running
+            if not await self._check_health():
+                logger.error("Ollama service not reachable")
+                return {"error": "Ollama service unavailable"}
+            
+            # Format messages for Ollama prompt
             prompt = self._format_messages(messages)
             
             payload = {
@@ -36,35 +41,63 @@ class OllamaClient(BaseLLMClient):
                 "stream": False,
                 "options": {
                     "temperature": self.temperature,
-                    "num_predict": self.max_tokens
+                    "num_predict": self.max_tokens,
+                    "stop": ["\n\n"]  # Avoid rambling
                 }
             }
+            
+            logger.info(f"Ollama request: model={self.model}, base_url={self.base_url}")
             
             response = await self.client.post(
                 f"{self.base_url}/api/generate",
                 json=payload
             )
-            response.raise_for_status()
+            
+            if response.status_code != 200:
+                logger.error(f"Ollama returned HTTP {response.status_code}: {response.text}")
+                return {"error": f"Ollama HTTP {response.status_code}"}
             
             result = response.json()
             content = result.get("response", "")
             
-            # Extract JSON if requested
+            if not content:
+                logger.error("Ollama returned empty response")
+                return {"error": "Empty response from Ollama"}
+            
+            # Extract and parse JSON if requested
             if response_format == "json":
-                return self._extract_json(content)
+                try:
+                    return self._extract_json(content)
+                except Exception as e:
+                    logger.error(f"Ollama JSON parse failure: {e}")
+                    return {"error": "Invalid JSON response from model", "raw": content}
             
             return {"content": content, "usage": {"total_tokens": result.get("eval_count", 0)}}
             
+        except httpx.ConnectError:
+            logger.error(f"Connection failed to Ollama at {self.base_url}")
+            return {"error": "Ollama connection failed"}
+        except httpx.TimeoutException:
+            logger.error("Ollama request timed out after 60s")
+            return {"error": "Ollama timeout"}
         except Exception as e:
-            logger.error(f"Ollama API error: {e}")
-            raise
+            logger.error(f"Ollama unexpected error: {e}", exc_info=True)
+            return {"error": str(e)}
+    
+    async def _check_health(self) -> bool:
+        """Verify Ollama is running"""
+        try:
+            response = await self.client.get(f"{self.base_url}/api/tags", timeout=2.0)
+            return response.status_code == 200
+        except:
+            return False
     
     async def embed(self, text: str) -> List[float]:
-        """Generate embeddings using Ollama"""
+        """Generate embeddings using configured embedding model"""
         try:
             payload = {
-                "model": self.model,
-                "prompt": text
+                "model": settings.ollama_embedding_model,
+                "prompt": text[:2000]  # Chunking usually ensures this is small
             }
             
             response = await self.client.post(
@@ -77,14 +110,13 @@ class OllamaClient(BaseLLMClient):
             return result.get("embedding", [])
             
         except Exception as e:
-            logger.error(f"Ollama embedding error: {e}")
-            # Fallback to dummy embedding for local testing
+            logger.error(f"Ollama embedding failure using {settings.ollama_embedding_model}: {e}")
             import hashlib
             hash_val = hashlib.md5(text.encode()).hexdigest()
             return [int(hash_val[i:i+2], 16) / 255.0 for i in range(0, min(20, len(hash_val)), 2)]
     
     def _format_messages(self, messages: List[Dict[str, str]]) -> str:
-        """Format messages for Ollama prompt"""
+        """Format messages for Ollama template"""
         formatted = []
         for msg in messages:
             role = msg.get("role", "user")
@@ -101,9 +133,5 @@ class OllamaClient(BaseLLMClient):
         return "".join(formatted)
     
     async def close(self):
-        """Close HTTP client"""
+        """Clean up HTTP connections"""
         await self.client.aclose()
-        
-    def __del__(self):
-        # Synchronous close is not possible easily here, but we should try
-        pass

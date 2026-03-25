@@ -2,7 +2,7 @@
 from typing import Dict, Any, Optional
 import logging
 from app.config import settings
-from app.services.llm.base import BaseLLMClient
+from app.services.llm.base_client import BaseLLMClient
 from app.services.llm.openai_client import OpenAIClient
 from app.services.llm.ollama_client import OllamaClient
 

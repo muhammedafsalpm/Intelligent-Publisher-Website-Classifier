@@ -1,9 +1,8 @@
 # app/services/llm/openai_client.py
 import openai
 from typing import Dict, List, Any
-import json
 import logging
-from app.services.llm.base import BaseLLMClient
+from app.services.llm.base_client import BaseLLMClient
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -38,7 +37,6 @@ class OpenAIClient(BaseLLMClient):
                 kwargs["response_format"] = {"type": "json_object"}
             
             response = await self.client.chat.completions.create(**kwargs)
-            
             content = response.choices[0].message.content
             
             # Extract JSON from response
