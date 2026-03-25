@@ -13,7 +13,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import time
-from app.api import classify
+from app.api import classify, admin
 from app.models import HealthResponse
 from app.utils.cache import cache
 from app.services.rag import PolicyStore
@@ -28,13 +28,21 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title=settings.api_title,
     version=settings.api_version,
-    docs_url="/docs" if settings.debug else None
+    docs_url="/docs"
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Middleware
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """Global request timeout to prevent hanging (default: 25s)"""
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=settings.api_timeout)
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=408, content={"detail": "Request timed out - try again or use a simpler URL"})
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,6 +52,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(classify.router, prefix="/api", tags=["classification"])
+app.include_router(admin.router)  # /admin prefix defined in router
 
 @app.on_event("startup")
 async def startup_event():

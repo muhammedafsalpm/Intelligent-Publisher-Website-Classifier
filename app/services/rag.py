@@ -1,173 +1,155 @@
-# app/services/rag.py - Updated for chromadb 0.4.22 compatibility
+# app/services/rag.py
 import chromadb
-from chromadb.utils import embedding_functions
-from typing import List, Dict
+from typing import List, Dict, Optional
 import logging
+import hashlib
 from pathlib import Path
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Lazy load sentence-transformers for better startup performance
+try:
+    from sentence_transformers import SentenceTransformer
+    USE_LOCAL_EMBEDDINGS = True
+except ImportError:
+    USE_LOCAL_EMBEDDINGS = False
+    logger.warning("sentence-transformers not found - the RAG layer will use fallback hashing")
+
 class PolicyStore:
-    """Vector database for classification policies"""
+    """Intelligent Policy Store using local sentence-transformer embeddings (no API dependency)"""
     
     def __init__(self):
-        # ChromaDB 0.4.22 uses PersistentClient
         self.client = chromadb.PersistentClient(path="./chroma_db")
+        self.model: Optional['SentenceTransformer'] = None
         
-        # Use appropriate embedding function
-        if settings.llm_provider == "openai":
-            self.embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
-                api_key=settings.openai_api_key,
-                model_name="text-embedding-ada-002"
-            )
-        else:
-            # For Ollama, create custom embedding function using a dedicated embedding model
-            self.embedding_fn = self._create_ollama_embedding_function()
+        if USE_LOCAL_EMBEDDINGS:
+            try:
+                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+                logger.info("Local embedding model 'all-MiniLM-L6-v2' active")
+            except Exception as e:
+                logger.error(f"Failed to load sentence-transformers: {e}")
         
-        # Get or create collection (chromadb 0.4.22 syntax)
+        # Create robust embedding wrapper
+        class UniversalEmbeddingFunction:
+            def __init__(self, parent):
+                self.parent = parent
+            
+            def __call__(self, input: List[str]) -> List[List[float]]:
+                if self.parent.model:
+                    # High quality local embeddings
+                    embeddings = self.parent.model.encode(input)
+                    return embeddings.tolist()
+                else:
+                    # Determinstic hashing fallback
+                    return [self.parent._hash_embedding(text) for text in input]
+        
         self.collection = self.client.get_or_create_collection(
             name="policies",
-            embedding_function=self.embedding_fn
+            embedding_function=UniversalEmbeddingFunction(self)
         )
         
-        # Initialize with policies if empty
-        if self.collection.count() == 0:
+        count = self.collection.count()
+        if count < 3:
+            # Either brand new or a stale/partial previous initialization — reload policies
+            if count > 0:
+                logger.warning(f"Stale policy store detected ({count} chunks) — clearing and re-initializing")
+                self.client.delete_collection("policies")
+                self.collection = self.client.get_or_create_collection(
+                    name="policies",
+                    embedding_function=UniversalEmbeddingFunction(self)
+                )
             self._initialize_policies()
-    
-    def _create_ollama_embedding_function(self):
-        """Create embedding function for Ollama using dedicated embedding model"""
-        class OllamaEmbeddingFunction:
-            def __init__(self, base_url, model):
-                self.base_url = base_url
-                self.model = model
-                import httpx
-                self.client = httpx.Client(timeout=30.0)
-            
-            def __call__(self, input):
-                """Generate embeddings for input texts"""
-                embeddings = []
-                for text in input:
-                    try:
-                        response = self.client.post(
-                            f"{self.base_url}/api/embeddings",
-                            json={"model": self.model, "prompt": text}
-                        )
-                        result = response.json()
-                        embeddings.append(result.get("embedding", []))
-                    except Exception as e:
-                        logger.error(f"Ollama embedding failed for model {self.model}: {e}")
-                        # Fallback to dummy embedding
-                        import hashlib
-                        hash_val = hashlib.md5(text.encode()).hexdigest()
-                        emb = [int(hash_val[i:i+2], 16) / 255.0 for i in range(0, min(20, len(hash_val)), 2)]
-                        embeddings.append(emb)
-                return embeddings
         
-        return OllamaEmbeddingFunction(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_embedding_model  # Use dedicated model like nomic-embed-text
-        )
+        # In-memory cache for repeated identical queries
+        self._query_cache: dict = {}
+    
+    def _hash_embedding(self, text: str, dim: int = 384) -> List[float]:
+        """Generate static embedding from SHA-256 hash for deterministic retrieval without a model"""
+        hash_obj = hashlib.sha256(text.encode())
+        hash_bytes = hash_obj.digest()
+        
+        embedding = []
+        for i in range(dim):
+            byte_val = hash_bytes[i % len(hash_bytes)]
+            embedding.append(float(byte_val) / 255.0)
+        
+        return embedding
     
     def _initialize_policies(self):
-        """Load policy documents from markdown file"""
+        """Index classification policy documents"""
         policy_path = Path(__file__).parent.parent / "policies" / "classification_policies.md"
         
         if not policy_path.exists():
-            logger.warning(f"Policy file not found at {policy_path}")
+            logger.warning(f"No policy document found at {policy_path}")
             return
         
-        with open(policy_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Split into sections
-        sections = self._split_policy_sections(content)
-        
-        for i, section in enumerate(sections):
-            # Create chunks
-            chunks = self._create_retrieval_units(section['text'], section['title'])
+        try:
+            with open(policy_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            for j, chunk in enumerate(chunks):
-                chunk_id = f"policy_{i}_{j}_{settings.llm_provider}"
-                self.collection.add(
-                    documents=[chunk],
-                    ids=[chunk_id],
-                    metadatas=[{
-                        "section": section['title'],
-                        "category": self._extract_category(section['title']),
-                        "chunk_index": j,
-                        "provider": settings.llm_provider
-                    }]
-                )
-        
-        logger.info(f"Initialized policy store with {self.collection.count()} chunks using {settings.llm_provider}")
+            sections = self._split_policy_blocks(content)
+            for i, section in enumerate(sections):
+                chunks = self._create_retrieval_units(section['text'], section['title'])
+                for j, chunk in enumerate(chunks):
+                    self.collection.add(
+                        documents=[chunk],
+                        ids=[f"p_{i}_{j}"],
+                        metadatas=[{
+                            "section": section['title'],
+                            "category": self._infer_category(section['title']),
+                            "chunk_id": j
+                        }]
+                    )
+            
+            logger.info(f"Policy store initialized with {self.collection.count()} chunks")
+        except Exception as e:
+            logger.error(f"Failed to bootstrap policy store: {e}")
     
-    def _split_policy_sections(self, content: str) -> List[Dict]:
-        """Split markdown into sections"""
+    def _split_policy_blocks(self, content: str) -> List[Dict]:
+        """Divide policy MD into titled blocks"""
         sections = []
-        current_section = {"title": "General Guidelines", "text": ""}
-        
+        current = {"title": "General", "text": ""}
         for line in content.split('\n'):
             if line.startswith('## '):
-                if current_section['text'].strip():
-                    sections.append(current_section)
-                current_section = {
-                    "title": line[3:].strip(),
-                    "text": ""
-                }
+                if current['text'].strip(): sections.append(current)
+                current = {"title": line[3:].strip(), "text": ""}
             else:
-                current_section['text'] += line + '\n'
-        
-        if current_section['text'].strip():
-            sections.append(current_section)
-        
+                current['text'] += line + '\n'
+        if current['text'].strip(): sections.append(current)
         return sections
     
-    def _create_retrieval_units(self, text: str, section_title: str) -> List[str]:
-        """Create retrieval units"""
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    def _create_retrieval_units(self, text: str, title: str) -> List[str]:
+        """Chunk policies for granular lookup"""
+        paras = [p.strip() for p in text.split('\n\n') if p.strip()]
+        units = []
+        current = []
+        c_len = 0
         
-        retrieval_units = []
-        current_unit = []
-        current_length = 0
-        
-        for para in paragraphs:
-            para_length = len(para)
-            
-            if current_length + para_length > settings.chunk_size and current_unit:
-                retrieval_units.append('\n\n'.join(current_unit))
-                current_unit = [para]
-                current_length = para_length
-            else:
-                current_unit.append(para)
-                current_length += para_length
-        
-        if current_unit:
-            retrieval_units.append('\n\n'.join(current_unit))
-        
-        # Add context
-        units_with_context = []
-        for unit in retrieval_units:
-            contextualized = f"[SECTION: {section_title}]\n\n{unit}"
-            units_with_context.append(contextualized)
-        
-        return units_with_context
+        for p in paras:
+            if c_len + len(p) > settings.chunk_size and current:
+                units.append(f"[{title}]\n" + "\n\n".join(current))
+                current, c_len = [], 0
+            current.append(p)
+            c_len += len(p)
+        if current:
+            units.append(f"[{title}]\n" + "\n\n".join(current))
+        return units
     
-    def _extract_category(self, title: str) -> str:
-        """Extract policy category"""
-        title_lower = title.lower()
-        
-        categories = ['cashback', 'adult', 'gambling', 'agency', 'scam', 'legitimate', 'ecommerce']
-        
-        for category in categories:
-            if category in title_lower:
-                return category
-        
+    def _infer_category(self, title: str) -> str:
+        t = title.lower()
+        for cat in ['cashback', 'adult', 'gambling', 'agency', 'scam', 'ecommerce']:
+            if cat in t: return cat
         return 'general'
     
     def retrieve_relevant_policies(self, query: str, top_k: int = None) -> tuple[str, List[Dict]]:
-        """Retrieve relevant policies"""
+        """Perform semantic search for policies relevant to the classification query"""
         top_k = top_k or settings.top_k_policies
+        
+        # Check in-memory cache first for speed
+        cache_key = f"{query[:80]}_{top_k}"
+        if cache_key in self._query_cache:
+            return self._query_cache[cache_key]
         
         try:
             results = self.collection.query(
@@ -176,23 +158,78 @@ class PolicyStore:
                 include=["documents", "metadatas", "distances"]
             )
             
-            policies = []
+            payloads = []
             if results['documents'] and results['documents'][0]:
                 for i, doc in enumerate(results['documents'][0]):
-                    policies.append({
+                    payloads.append({
                         "text": doc,
                         "metadata": results['metadatas'][0][i] if results['metadatas'] else {},
-                        "relevance_score": 1 - results['distances'][0][i] if results['distances'] else 0.5
+                        "relevance": 1 - results['distances'][0][i] if results['distances'] else 0
                     })
             
-            # Format policies
-            formatted = []
-            for p in policies:
-                category = p['metadata'].get('category', 'general')
-                formatted.append(f"[{category}]\n{p['text']}")
+            # Limit each policy chunk to 500 chars to keep LLM context lean
+            formatted = "\n\n---\n\n".join([f"[{p['metadata'].get('section')}]\n{p['text'][:500]}" for p in payloads])
+            result = (formatted, payloads)
             
-            return "\n\n---\n\n".join(formatted), policies
+            # Cache (LRU-style: evict oldest when over 50 entries)
+            if len(self._query_cache) > 50:
+                self._query_cache.pop(next(iter(self._query_cache)))
+            self._query_cache[cache_key] = result
             
+            return result
         except Exception as e:
-            logger.error(f"Error retrieving policies: {e}")
+            logger.error(f"RAG retrieval failure: {e}")
             return "", []
+    
+    def add_policy(self, section_title: str, policy_text: str) -> int:
+        """Dynamically add a new policy chunk to the store and clear the query cache"""
+        chunks = self._create_retrieval_units(policy_text, section_title)
+        current_count = self.collection.count()
+        
+        for j, chunk in enumerate(chunks):
+            chunk_id = f"dynamic_{current_count}_{j}"
+            self.collection.add(
+                documents=[chunk],
+                ids=[chunk_id],
+                metadatas=[{
+                    "section": section_title,
+                    "category": self._infer_category(section_title),
+                    "chunk_id": j,
+                    "source": "dynamic"
+                }]
+            )
+        
+        self._query_cache.clear()  # Invalidate cache so new policy is picked up
+        logger.info(f"Added {len(chunks)} chunks for section '{section_title}'")
+        return self.collection.count()
+    
+    def force_reload(self) -> int:
+        """Wipe existing collection and reload from the markdown policy file"""
+        try:
+            self.client.delete_collection("policies")
+        except Exception:
+            pass
+        
+        from sentence_transformers import SentenceTransformer as _ST
+        
+        class _EF:
+            def __init__(self, parent):
+                self.parent = parent
+            def __call__(self, input):
+                if self.parent.model:
+                    return self.parent.model.encode(input).tolist()
+                return [self.parent._hash_embedding(t) for t in input]
+        
+        self.collection = self.client.get_or_create_collection(
+            name="policies",
+            embedding_function=_EF(self)
+        )
+        self._query_cache.clear()
+        self._initialize_policies()
+        logger.info(f"Force-reloaded policy store: {self.collection.count()} chunks")
+        return self.collection.count()
+    
+    def clear_cache(self):
+        """Flush the in-memory query cache"""
+        self._query_cache.clear()
+

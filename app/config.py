@@ -6,7 +6,7 @@ from typing import Optional, Literal
 class Settings(BaseSettings):
     # API Settings
     api_title: str = "Publisher Website Classifier"
-    api_version: str = "2.0.0"
+    api_version: str = "3.1.0"
     debug: bool = False
     
     # LLM Provider Selection
@@ -29,16 +29,20 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_max_tokens: int = 800
     
+    # Timeout Settings
+    api_timeout: int = 25
+    llm_timeout: int = 20
+    
     # Scraping Settings
     request_timeout: int = 15
-    max_content_length: int = 10000
+    max_content_length: int = 5000
     min_content_length: int = 200
     user_agent: str = "Mozilla/5.0 (compatible; PublisherClassifier/1.0)"
     
     # RAG Settings
     chunk_size: int = 800
     chunk_overlap: int = 100
-    top_k_policies: int = 4
+    top_k_policies: int = 2
     
     # Cache Settings
     redis_url: str = "redis://localhost:6379"
@@ -46,6 +50,9 @@ class Settings(BaseSettings):
     
     # Rate Limiting
     rate_limit_per_minute: int = 30
+    
+    # Admin
+    admin_api_key: str = "changeme"
     
     # Monitoring
     enable_metrics: bool = True

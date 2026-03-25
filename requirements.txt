@@ -1,4 +1,4 @@
-# requirements.txt - No Playwright
+# requirements.txt
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
@@ -16,3 +16,4 @@ structlog==24.1.0
 python-dotenv==1.0.0
 tldextract==3.6.0
 slowapi==0.1.9
+sentence-transformers==2.2.2

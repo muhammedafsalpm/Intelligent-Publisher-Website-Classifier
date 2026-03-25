@@ -1,95 +1,154 @@
 # app/services/scraper.py
 import httpx
-from bs4 import BeautifulSoup
 from typing import Dict
 import logging
+import re
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 class WebsiteScraper:
-    """HTTP-only scraper - no JavaScript rendering for maximum stability and speed"""
+    """Universal website scraper with tiered extraction (Trafilatura -> BS4 -> Regex)"""
     
     def __init__(self):
         self.timeout = settings.request_timeout
-        self.max_content = settings.max_content_length
-        # Use a more realistic browser-like user agent
+        self.max_content = self._get_safe_max_content(settings.max_content_length)
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
         }
+
+    def _get_safe_max_content(self, length: int) -> int:
+        """Ensure max content is within reasonable limits for LLM context"""
+        return min(length, 15000)
     
     async def fetch(self, url: str) -> Dict:
-        """Fetch website content using pure HTTP"""
+        """Fetch website content using a universal approach (no hardcoded sites)"""
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout,
                 follow_redirects=True,
                 headers=self.headers,
-                verify=False  # Avoid SSL issues
+                verify=False
             ) as client:
                 response = await client.get(url)
                 
-                if response.status_code == 200:
-                    return self._parse_html(response.text)
-                else:
-                    logger.warning(f"HTTP {response.status_code} for {url}")
-                    return self._error_response(url, f"HTTP {response.status_code}")
+                logger.info(f"Scraper: HTTP {response.status_code} for {url}")
                 
+                if response.status_code in [200, 202]:
+                    if response.text and len(response.text) > 500:
+                        return self._extract_text_universal(response.text, url)
+                    else:
+                        logger.warning(f"Response body too small for {url}")
+                        return self._error_response(url, "Empty or minimal response")
+                else:
+                    logger.warning(f"Fetch failed with HTTP {response.status_code}")
+                    return self._error_response(url, f"HTTP {response.status_code}")
+                    
         except httpx.TimeoutException:
-            logger.error(f"Timeout for {url}")
-            return self._error_response(url, "Request timeout")
+            logger.error(f"Scrape timeout for {url}")
+            return self._error_response(url, "Timeout")
         except Exception as e:
-            logger.error(f"Failed to fetch {url}: {e}")
+            logger.error(f"Scraper error for {url}: {e}")
             return self._error_response(url, str(e))
     
-    def _parse_html(self, html: str) -> Dict:
-        """Extract relevant content from HTML"""
-        soup = BeautifulSoup(html, 'html.parser')
+    def _extract_text_universal(self, html: str, url: str) -> Dict:
+        """Tiered extraction strategy for maximum reliability across all domains"""
         
-        # Remove non-content elements to reduce token noise
-        for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "iframe", "object"]):
-            tag.decompose()
+        # Method 1: Trafilatura (Scientific/Article extraction)
+        try:
+            import trafilatura
+            main_text = trafilatura.extract(html, include_comments=False, include_tables=True)
+            if main_text and len(main_text) > 300:
+                logger.debug("Trafilatura extraction successful")
+                return {
+                    'title': self._extract_title(html),
+                    'meta_description': self._extract_meta_description(html),
+                    'main_text': main_text[:self.max_content],
+                    'links': [],
+                    'has_js_content': False
+                }
+        except Exception:
+            pass
         
-        # Extract title
-        title = soup.title.string.strip() if soup.title and soup.title.string else ""
+        # Method 2: BeautifulSoup (Selective extraction)
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Clean noise
+            for tag in soup(["script", "style", "noscript", "meta", "link", "nav", "footer", "header"]):
+                tag.decompose()
+            
+            # Target main areas
+            main_text = ""
+            for selector in ['main', 'article', '#content', '.content', '#main', '.main', 'section']:
+                element = soup.select_one(selector)
+                if element:
+                    t = element.get_text(separator=' ', strip=True)
+                    if len(t) > 500:
+                        main_text = t
+                        break
+            
+            # Fallback to pure body
+            if len(main_text) < 300:
+                body = soup.find('body')
+                main_text = body.get_text(separator=' ', strip=True) if body else soup.get_text(separator=' ', strip=True)
+            
+            # Clean and return
+            main_text = re.sub(r'\s+', ' ', main_text).strip()
+            if len(main_text) > 100:
+                logger.debug("BS4 extraction successful")
+                return {
+                    'title': self._extract_title(html),
+                    'meta_description': self._extract_meta_description(html),
+                    'main_text': main_text[:self.max_content],
+                    'links': [],
+                    'has_js_content': False
+                }
+        except Exception as e:
+            logger.error(f"BS4 parsing failure: {e}")
         
-        # Extract meta description
-        meta_desc = soup.find("meta", {"name": "description"})
-        meta_description = meta_desc.get("content", "").strip() if meta_desc else ""
-        
-        # Extract main text
-        main_text = soup.get_text(separator=' ', strip=True)
-        main_text = ' '.join(main_text.split())  # Normalize whitespace
-        main_text = main_text[:self.max_content]
-        
-        # Extract links for category signals
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.startswith(('http://', 'https://')):
-                links.append(href)
-        links = list(set(links))[:50]
+        # Method 3: Regex (Raw fail-safe)
+        return self._extract_regex_fallback(html, url)
+    
+    def _extract_title(self, html: str) -> str:
+        """Regex-based title extraction"""
+        match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+        return match.group(1).strip() if match else ""
+    
+    def _extract_meta_description(self, html: str) -> str:
+        """Regex-based meta extraction"""
+        patterns = [
+            r'<meta\s+name=["\']description["\']\s+content=["\'](.*?)["\']',
+            r'<meta\s+content=["\'](.*?)["\']\s+name=["\']description["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+    
+    def _extract_regex_fallback(self, html: str, url: str) -> Dict:
+        """Bare-metal regex extraction for malformed HTML"""
+        logger.info("Using regex fallback for extraction")
+        # Strip code blocks
+        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        # Strip all tags
+        text = re.sub(r'<[^>]+>', ' ', text)
+        # Clean whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
         
         return {
-            'title': title,
-            'meta_description': meta_description,
-            'main_text': main_text,
-            'links': links,
-            'has_js_content': False  # Pure HTTP scraper
+            'title': self._extract_title(html),
+            'meta_description': self._extract_meta_description(html),
+            'main_text': text[:self.max_content],
+            'links': [],
+            'has_js_content': False
         }
     
     def _error_response(self, url: str, error: str) -> Dict:
-        """Return empty result for error states"""
         return {
             'url': url,
             'title': '',

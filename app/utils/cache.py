@@ -22,8 +22,8 @@ class RedisCache:
             await self.client.ping()
             self._connected = True
             logger.info("Redis connected successfully")
-        except Exception as e:
-            logger.warning(f"Redis connection failed: {e}. Running without cache.")
+        except Exception:
+            logger.debug("Redis unavailable — running without cache (no action required)")
             self._connected = False
     
     async def get(self, key: str) -> Optional[Any]:

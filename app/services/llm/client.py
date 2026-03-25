@@ -82,86 +82,86 @@ class LLMClient:
             return self._get_fallback_signals()
     
     def _get_system_prompt(self) -> str:
-        """System prompt with no hardcoded rules"""
-        return f"""You are an expert website classifier for affiliate marketing quality control.
+        """System prompt with clear scoring guidelines"""
+        return """You are a precise website classifier for affiliate marketing quality control.
 
-Your role is to evaluate publisher websites against dynamic policies retrieved from our knowledge base.
+SCORING GUIDELINES (assign overall_score based on these bands):
+- 90-100: Excellent quality, legitimate publisher, all trust signals present
+- 70-89: Good quality, meets standards, minor gaps
+- 50-69: Acceptable quality, some concerns
+- 30-49: Poor quality, significant concerns, flag for review
+- 0-29: Unacceptable - policy violations (gambling, adult, scam = 0)
 
-CRITICAL PRINCIPLES:
-1. BASE DECISIONS ON RETRIEVED POLICIES: The policies provided are your only source of truth
-2. CONSIDER ALL EVIDENCE: Use extracted signals and content together
-3. BE PRECISE: Provide clear reasoning in the summary
-4. CALIBRATE CONFIDENCE: High = clear evidence, Medium = mixed signals, Low = insufficient
+CLASSIFICATION DIMENSIONS:
+- is_cashback_site: Cashback/rewards programs sharing affiliate commissions with users
+- is_adult_content: Explicit sexual content or adult services
+- is_gambling: Real money betting, casino, or wagering
+- is_agency_or_introductory: Thin content, primarily redirects to affiliate offers
+- is_scam_or_low_quality: Deceptive practices or extremely poor quality
 
-Provider: {settings.llm_provider}
-Model: {self.client.model}"""
+CRITICAL: Base your decisions on the provided policies. Return ONLY valid JSON.
+Do NOT explain your reasoning outside the summary field."""
 
     def _build_dynamic_prompt(self, text: str, policies: str, signals: Dict) -> str:
-        """Build classification prompt"""
-        import json
-        return f"""
-        ## ACTIVE POLICIES
-        {policies}
-        
-        ## EXTRACTED SIGNALS
-        {json.dumps(signals, indent=2)}
-        
-        ## WEBSITE CONTENT
-        {text[:3000]}
-        
-        ## YOUR TASK
-        Based SOLELY on the policies above, classify this website.
-        
-        Return JSON ONLY:
-        {{
-            "is_cashback_site": boolean,
-            "is_adult_content": boolean,
-            "is_gambling": boolean,
-            "is_agency_or_introductory": boolean,
-            "is_scam_or_low_quality": boolean,
-            "overall_score": 0-100,
-            "summary": "brief explanation",
-            "confidence": "high|medium|low"
-        }}"""
+        """Build optimized classification prompt (lean for speed)"""
+        category = signals.get('primary_category', 'unknown')
+        quality = signals.get('content_quality', 'medium')
+        return f"""Policies:
+{policies[:800]}
+
+Site type: {category} | Quality: {quality}
+
+Content:
+{text[:2000]}
+
+Classify. Return JSON only:
+{{
+    "is_cashback_site": false,
+    "is_adult_content": false,
+    "is_gambling": false,
+    "is_agency_or_introductory": false,
+    "is_scam_or_low_quality": false,
+    "overall_score": 0,
+    "summary": "brief explanation",
+    "confidence": "high|medium|low"
+}}"""
 
     def _build_signals_prompt(self, text: str, url: str) -> str:
-        """Build signals extraction prompt"""
-        return f"""
-        Analyze this website and provide 8 structured signals in JSON.
-        
-        URL: {url}
-        CONTENT: {text[:2500]}
-        
-        Required JSON Fields:
-        - primary_category (e.g. blog, news, gambling, adult, cashback, agency)
-        - keywords (top 10 keywords)
-        - content_quality (original, spammy, thin, mixed)
-        - business_model (affiliate, direct sales, etc.)
-        - trust_signals (list: contact info, privacy, about, etc.)
-        - risk_indicators (list: scam patterns, popups, aggressive CTAs, etc.)
-        - language (detected language)
-        - uniqueness_score (0.0-1.0)
-        """
+        """Build lean signals extraction prompt"""
+        return f"""Analyze this website. URL: {url}
+
+Content: {text[:1500]}
+
+Return JSON only:
+{{
+    "primary_category": "ecommerce|blog|news|gambling|adult|cashback|agency|other",
+    "content_quality": "high|medium|low|spam",
+    "business_model": "direct_sales|affiliate|subscription|ad_supported|unknown",
+    "trust_signals": [],
+    "risk_indicators": []
+}}"""
     
     def _ensure_required_fields(self, result: Dict) -> Dict:
-        """Ensure all required fields exist"""
+        """Ensure all required fields exist — trust the LLM's score, never override it"""
         required = [
             "is_cashback_site", "is_adult_content", "is_gambling",
             "is_agency_or_introductory", "is_scam_or_low_quality",
             "overall_score", "summary", "confidence"
         ]
         
+        # Fill only missing fields — do not overwrite LLM-provided values
         for field in required:
             if field not in result:
                 if field.startswith("is_"):
                     result[field] = False
                 elif field == "overall_score":
-                    result[field] = 50
+                    result[field] = 50  # Fallback only if LLM omitted it
                 elif field == "summary":
-                    result[field] = "Inferred classification"
+                    result[field] = "Classification based on available evidence"
                 elif field == "confidence":
                     result[field] = "medium"
         
+        # Only enforce valid numeric range — no hardcoded score overrides
         result['overall_score'] = max(0, min(100, result['overall_score']))
         return result
     
