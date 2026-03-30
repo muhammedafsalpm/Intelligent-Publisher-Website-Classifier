@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 800
     
     # Timeout Settings
-    api_timeout: int = 25
+    api_timeout: int = 60
     llm_timeout: int = 20
     
     # Scraping Settings

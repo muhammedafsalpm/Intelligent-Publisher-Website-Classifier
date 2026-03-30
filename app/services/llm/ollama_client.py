@@ -18,7 +18,7 @@ class OllamaClient(BaseLLMClient):
             max_tokens=settings.ollama_max_tokens
         )
         self.base_url = settings.ollama_base_url
-        self.client = httpx.AsyncClient(timeout=60.0)  # Increased timeout for classification
+        self.client = httpx.AsyncClient(timeout=120.0)  # Increased timeout for classification
     
     async def chat_completion(
         self,

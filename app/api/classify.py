@@ -12,7 +12,7 @@ async def classify_website(request: ClassificationRequest):
     try:
         result = await asyncio.wait_for(
             classifier.classify(str(request.url)),
-            timeout=25.0
+            timeout=60.0
         )
         return ClassificationResponse(**result)
         
