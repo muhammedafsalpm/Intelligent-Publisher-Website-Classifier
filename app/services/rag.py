@@ -120,20 +120,59 @@ class PolicyStore:
         return sections
     
     def _create_retrieval_units(self, text: str, title: str) -> List[str]:
-        """Chunk policies for granular lookup"""
+        """Chunk policies with configurable overlap"""
         paras = [p.strip() for p in text.split('\n\n') if p.strip()]
-        units = []
-        current = []
-        c_len = 0
         
-        for p in paras:
-            if c_len + len(p) > settings.chunk_size and current:
+        if not paras:
+            return []
+        
+        units = []
+        i = 0
+        
+        while i < len(paras):
+            current = []
+            current_len = 0
+            start_idx = i
+            
+            # Add overlap from previous chunk if configured
+            overlap_text = ""
+            if i > 0 and settings.chunk_overlap > 0 and units:
+                # Get previous chunk content
+                prev_chunk = units[-1]
+                if ']\n' in prev_chunk:
+                    prev_content = prev_chunk.split(']\n', 1)[1]
+                else:
+                    prev_content = prev_chunk
+                
+                # Take last chunk_overlap characters
+                overlap_chars = min(settings.chunk_overlap, len(prev_content))
+                if overlap_chars > 0:
+                    overlap_text = prev_content[-overlap_chars:]
+                    # Optional: trim to last paragraph for cleaner overlap
+                    last_break = overlap_text.rfind('\n\n')
+                    if last_break > len(overlap_text) // 2:
+                        overlap_text = overlap_text[last_break + 2:]
+                    
+                    if overlap_text.strip():
+                        current.append(overlap_text.strip())
+                        current_len += len(overlap_text)
+            
+            # Add new paragraphs
+            for j in range(start_idx, len(paras)):
+                para_len = len(paras[j])
+                if current_len + para_len > settings.chunk_size and current:
+                    break
+                current.append(paras[j])
+                current_len += para_len
+            
+            if current:
                 units.append(f"[{title}]\n" + "\n\n".join(current))
-                current, c_len = [], 0
-            current.append(p)
-            c_len += len(p)
-        if current:
-            units.append(f"[{title}]\n" + "\n\n".join(current))
+            
+            # Move forward by number of new paragraphs (not overlap paragraphs)
+            # Count only paragraphs that were NOT part of the overlap
+            new_paras_added = len([p for p in current if p not in ([overlap_text.strip()] if overlap_text.strip() else [])])
+            i += max(1, new_paras_added)
+        
         return units
     
     def _infer_category(self, title: str) -> str:

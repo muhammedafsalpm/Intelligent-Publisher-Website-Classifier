@@ -49,14 +49,3 @@ class OpenAIClient(BaseLLMClient):
             logger.error(f"OpenAI API error: {e}")
             raise
     
-    async def embed(self, text: str) -> List[float]:
-        """Generate embeddings using OpenAI"""
-        try:
-            response = await self.client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            logger.error(f"OpenAI embedding error: {e}")
-            raise

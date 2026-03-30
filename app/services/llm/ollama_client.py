@@ -92,28 +92,6 @@ class OllamaClient(BaseLLMClient):
         except:
             return False
     
-    async def embed(self, text: str) -> List[float]:
-        """Generate embeddings using configured embedding model"""
-        try:
-            payload = {
-                "model": settings.ollama_embedding_model,
-                "prompt": text[:2000]  # Chunking usually ensures this is small
-            }
-            
-            response = await self.client.post(
-                f"{self.base_url}/api/embeddings",
-                json=payload
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            return result.get("embedding", [])
-            
-        except Exception as e:
-            logger.error(f"Ollama embedding failure using {settings.ollama_embedding_model}: {e}")
-            import hashlib
-            hash_val = hashlib.md5(text.encode()).hexdigest()
-            return [int(hash_val[i:i+2], 16) / 255.0 for i in range(0, min(20, len(hash_val)), 2)]
     
     def _format_messages(self, messages: List[Dict[str, str]]) -> str:
         """Format messages for Ollama template"""

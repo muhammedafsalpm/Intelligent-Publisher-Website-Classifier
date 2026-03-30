@@ -23,10 +23,6 @@ class BaseLLMClient(ABC):
         """Send chat completion request to LLM"""
         pass
     
-    @abstractmethod
-    async def embed(self, text: str) -> List[float]:
-        """Generate embeddings for text"""
-        pass
     
     def _extract_json(self, response: str) -> Dict:
         """Extract JSON from response"""
